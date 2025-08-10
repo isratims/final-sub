@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Ktuvit Helper</title>
+  <style>
+    body{background:#0f172a;color:#e2e8f0;font-family:system-ui,Segoe UI,Arial,sans-serif;margin:0}
+    .wrap{max-width:760px;margin:40px auto;padding:16px}
+    h1{font-size:2rem;margin:0 0 20px}
+    .card{background:#111827;border:1px solid #1f2937;border-radius:14px;padding:18px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+    label{display:block;margin-top:14px;margin-bottom:6px;color:#cbd5e1}
+    input,select,button{width:100%;padding:12px 14px;font-size:16px;border-radius:12px;border:1px solid #334155;background:#0b1324;color:#e2e8f0;outline:none}
+    input:focus,select:focus{border-color:#60a5fa}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .actions{display:flex;gap:12px;margin-top:16px}
+    .primary{background:#2563eb;border-color:#1d4ed8}
+    .muted{background:#0b1324}
+    .note{margin-top:10px;color:#94a3b8;font-size:.95rem}
+    .result{background:#0b1324;border:1px solid #1f2937;border-radius:12px;padding:14px;margin-top:12px}
+    .result b{color:#e5e7eb}
+    .download{margin-top:10px}
+    .empty{color:#94a3b8;margin-top:10px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>הורדת כתוביות מ-Ktuvit</h1>
+    <div class="card">
+      <label>סוג</label>
+      <select id="mode">
+        <option value="film">סרט</option>
+        <option value="series" selected>סדרה</option>
+      </select>
+
+      <label>שם / IMDb ID</label>
+      <input id="query" placeholder="לדוגמה: Money Heist / tt6468322" />
+
+      <div class="row">
+        <div>
+          <label>עונה</label>
+          <input id="season" type="number" min="1" value="1" />
+        </div>
+        <div>
+          <label>פרק</label>
+          <input id="episode" type="number" min="1" value="1" />
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="muted" id="clearBtn">ניקוי</button>
+        <button class="primary" id="searchBtn">חיפוש</button>
+      </div>
+
+      <div id="status" class="note"></div>
+      <div id="results"></div>
+    </div>
+  </div>
+
+  <script>
+    const el = id => document.getElementById(id);
+    const modeEl = el('mode');
+    const queryEl = el('query');
+    const seasonEl = el('season');
+    const episodeEl = el('episode');
+    const resultsEl = el('results');
+    const statusEl = el('status');
+
+    function setStatus(msg){ statusEl.textContent = msg || ''; }
+    function clearResults(){ resultsEl.innerHTML = ''; }
+
+    async function search(){
+      setStatus('מחפש…');
+      clearResults();
+      try{
+        const body = {
+          mode: modeEl.value,
+          query: queryEl.value.trim(),
+          season: Number(seasonEl.value || 1),
+          episode: Number(episodeEl.value || 1)
+        };
+        const r = await fetch('/api/search', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(body)
+        });
+        const data = await r.json();
+        if (!data.ok) throw new Error(data.error || 'שגיאה');
+        setStatus('');
+
+        if (!data.results || !data.results.length){
+          resultsEl.innerHTML = '<div class="empty">לא נמצאו תוצאות.</div>';
+          if (data.note) setStatus(data.note);
+          return;
+        }
+
+        data.results.forEach(item=>{
+          const wrap = document.createElement('div');
+          wrap.className = 'result';
+          const title = item.subName || item.name || '(ללא שם)';
+          const size = item.size ? ` · ${item.size}` : '';
+          const dls = item.downloads!=null ? ` · ${item.downloads} הורדות` : '';
+          const when = item.uploadDate ? ` · ${new Date(item.uploadDate).toLocaleDateString('he-IL')}` : '';
+          wrap.innerHTML = `<b>${title}</b><div class="note">${(item.fileType||'srt').toUpperCase()}${size}${dls}${when}</div>`;
+
+          const btn = document.createElement('a');
+          btn.textContent = 'הורדה';
+          btn.className = 'download primary';
+          btn.style.display = 'inline-block';
+          btn.style.padding = '10px 14px';
+          btn.style.borderRadius = '10px';
+          btn.style.textDecoration = 'none';
+          btn.style.color = '#fff';
+
+          const name = encodeURIComponent(`${title}.srt`);
+          btn.href = `/api/download/${data.ktuvitId}/${item.id}?name=${name}`;
+          wrap.appendChild(document.createElement('br'));
+          wrap.appendChild(btn);
+
+          resultsEl.appendChild(wrap);
+        });
+      }catch(e){
+        console.error(e);
+        setStatus('שגיאה בבקשה לשרת');
+        resultsEl.innerHTML = '<div class="empty">Failed to fetch</div>';
+      }
+    }
+
+    document.getElementById('searchBtn').onclick = search;
+    document.getElementById('clearBtn').onclick = () => {
+      queryEl.value = '';
+      seasonEl.value = 1;
+      episodeEl.value = 1;
+      setStatus('');
+      clearResults();
+      queryEl.focus();
+    };
+  </script>
+</body>
+</html>
