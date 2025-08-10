@@ -17,9 +17,12 @@ app.use("/api/", rateLimit({ windowMs: 60_000, max: 30, standardHeaders: true })
 
 // ---- Ktuvit ----
 const token = process.env.KTUVIT_TOKEN || ""; // ה-cookie בפורמט u=...&g=...
-if (!token) console.warn("⚠️  חסר KTUVIT_TOKEN בקובץ .env");
+const ktuvitBaseUrl = process.env.KTUVIT_BASE_URL || "https://www.ktuvit.me/";
 
-const ktuvit = new KtuvitManager(token);
+if (!token) console.warn("⚠️  חסר KTUVIT_TOKEN בקובץ .env");
+console.log(`🔗 משתמש בכתובת Ktuvit: ${ktuvitBaseUrl}`);
+
+const ktuvit = new KtuvitManager(token, true, ktuvitBaseUrl);
 
 // ---- עזר ----
 function norm(s) {
@@ -31,20 +34,76 @@ function norm(s) {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+// Enhanced Hebrew normalization for better matching
+function normalizeHebrew(s) {
+  if (!s) return "";
+  return s
+    .normalize("NFKC")
+    // Remove nikud (Hebrew vowel marks)
+    .replace(/[\u0591-\u05C7]/g, "")
+    // Normalize common Hebrew letter variations
+    .replace(/ך/g, "כ")
+    .replace(/ם/g, "מ") 
+    .replace(/ן/g, "נ")
+    .replace(/ף/g, "פ")
+    .replace(/ץ/g, "צ")
+    .toLowerCase()
+    .replace(/[._\-]+/g, " ")
+    .replace(/[^\p{L}\p{N} /:&]+/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 const HEBREW_RE = /[\u0590-\u05FF]/;
 
 // בוחר תוצאה הכי מתאימה לפי שם ושנה/סוג
 function rankKtuvitResults(list, q, mode) {
   const nq = norm(q);
+  const isHebrew = HEBREW_RE.test(q);
+  const hebrewNq = isHebrew ? normalizeHebrew(q) : "";
   const wantSeries = mode === "series";
+  
   return (Array.isArray(list) ? list : [])
     .filter((x) => (wantSeries ? /series/i.test(x.Type) : !/series/i.test(x.Type)))
     .map((x) => {
-      const name = norm(`${x.HebName || ""} ${x.EngName || ""}`);
+      const engName = norm(x.EngName || "");
+      const hebName = norm(x.HebName || "");
+      const hebNameNormalized = normalizeHebrew(x.HebName || "");
+      const fullName = norm(`${x.HebName || ""} ${x.EngName || ""}`);
+      
       let score = 0;
-      if (name === nq) score -= 10000;
-      else if (name.startsWith(nq)) score -= 700;
-      else if (name.includes(nq)) score -= 400;
+      
+      // Exact matches get highest priority
+      if (engName === nq || hebName === nq || fullName === nq) {
+        score -= 10000;
+      }
+      // For Hebrew queries, check normalized Hebrew name
+      else if (isHebrew && hebNameNormalized === hebrewNq) {
+        score -= 9000;
+      }
+      // Start matches
+      else if (engName.startsWith(nq) || hebName.startsWith(nq) || fullName.startsWith(nq)) {
+        score -= 700;
+      }
+      // For Hebrew queries, check if normalized Hebrew starts with query
+      else if (isHebrew && hebNameNormalized.startsWith(hebrewNq)) {
+        score -= 650;
+      }
+      // Contains matches
+      else if (engName.includes(nq) || hebName.includes(nq) || fullName.includes(nq)) {
+        score -= 400;
+      }
+      // For Hebrew queries, check if normalized Hebrew contains query
+      else if (isHebrew && hebNameNormalized.includes(hebrewNq)) {
+        score -= 350;
+      }
+      
+      // Prefer items with Hebrew names for Hebrew queries
+      if (isHebrew && x.HebName && x.HebName.trim()) {
+        score -= 50;
+      }
+      
       return { raw: x, _score: score };
     })
     .sort((a, b) => a._score - b._score)
@@ -58,8 +117,14 @@ app.post("/api/resolve", async (req, res) => {
   try {
     const { query, mode = "film" } = req.body || {};
     if (!query?.trim()) return res.json({ ok: true, results: [] });
-    const list = await ktuvit.searchKtuvit(query.trim());
-    const ranked = rankKtuvitResults(list, query, mode).slice(0, 15);
+    
+    const q = query.trim();
+    const isHebrew = HEBREW_RE.test(q);
+    console.log(`🔍 resolve: "${q}" (${isHebrew ? 'עברית' : 'אנגלית'})`);
+    
+    const list = await ktuvit.searchKtuvit(q);
+    const ranked = rankKtuvitResults(list, q, mode).slice(0, 15);
+    
     const results = ranked.map((x) => ({
       id: String(x.Id),
       title: x.EngName || x.HebName || "(ללא שם)",
@@ -68,10 +133,18 @@ app.post("/api/resolve", async (req, res) => {
       type: /series/i.test(x.Type) ? "series" : "film",
       _score: 0,
     }));
+    
+    console.log(`📋 resolve results: ${results.length} פריטים`);
     res.json({ ok: true, results });
   } catch (e) {
     console.error("resolve error:", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    let errorMsg = String(e?.message || e);
+    
+    if (errorMsg.includes("ENOTFOUND") || errorMsg.includes("getaddrinfo")) {
+      errorMsg = `שגיאת חיבור לשרת Ktuvit (${ktuvitBaseUrl}). בדוק את החיבור לאינטרנט או נסה שוב מאוחר יותר.`;
+    }
+    
+    res.status(500).json({ ok: false, error: errorMsg });
   }
 });
 
@@ -82,24 +155,40 @@ app.post("/api/search", async (req, res) => {
     if (!query?.trim()) return res.status(400).json({ ok: false, error: "יש לספק טקסט חיפוש" });
 
     const q = query.trim();
+    const isHebrew = HEBREW_RE.test(q);
+    console.log(`🔍 חיפוש: "${q}" (${isHebrew ? 'עברית' : 'אנגלית'}), מצב: ${mode}`);
+    
     const list = await ktuvit.searchKtuvit(q);
+    console.log(`📋 נמצאו ${Array.isArray(list) ? list.length : 0} תוצאות ראשוניות`);
+    
     const ranked = rankKtuvitResults(list, q, mode);
+    console.log(`🎯 לאחר דירוג: ${ranked.length} תוצאות רלוונטיות`);
 
-    for (const item of ranked) {
+    for (const [index, item] of ranked.entries()) {
       const ktuvitId = item.Id;
+      console.log(`🎬 בודק פריט ${index + 1}: "${item.HebName || item.EngName}" (ID: ${ktuvitId})`);
+      
       let results = [];
       if (mode === "series") {
         const s = Number(season || 1);
         const e = Number(episode || 1);
         try {
           results = await ktuvit.getSubsIDsListEpisode(ktuvitId, s, e);
-        } catch {}
+          console.log(`📺 סדרה - עונה ${s} פרק ${e}: ${Array.isArray(results) ? results.length : 0} כתוביות`);
+        } catch (err) {
+          console.log(`❌ שגיאה בטעינת כתוביות סדרה: ${err.message}`);
+        }
       } else {
         try {
           results = await ktuvit.getSubsIDsListMovie(ktuvitId);
-        } catch {}
+          console.log(`🎥 סרט: ${Array.isArray(results) ? results.length : 0} כתוביות`);
+        } catch (err) {
+          console.log(`❌ שגיאה בטעינת כתוביות סרט: ${err.message}`);
+        }
       }
+      
       if (Array.isArray(results) && results.length) {
+        console.log(`✅ נמצאו כתוביות עבור: "${item.HebName || item.EngName}"`);
         return res.json({
           ok: true,
           ktuvitId,
@@ -114,13 +203,30 @@ app.post("/api/search", async (req, res) => {
     res.json({
       ok: true,
       results: [],
-      note: HEBREW_RE.test(q)
-        ? "לא נמצאו כתוביות לשם הזה/לעונה/פרק. נסה ניסוח מעט שונה או מספרי עונה/פרק אחרים."
-        : "לא נמצאו כתוביות. נסה גם את השם בעברית או בדוק עונה/פרק.",
+      searchInfo: {
+        query: q,
+        isHebrew,
+        totalFound: Array.isArray(list) ? list.length : 0,
+        relevantAfterRanking: ranked.length
+      },
+      note: isHebrew
+        ? `לא נמצאו כתוביות לחיפוש "${q}". נמצאו ${Array.isArray(list) ? list.length : 0} תוצאות כלליות אך ללא כתוביות זמינות. נסה ניסוח מעט שונה או מספרי עונה/פרק אחרים.`
+        : `לא נמצאו כתוביות לחיפוש "${q}". נסה גם את השם בעברית או בדוק עונה/פרק.`,
     });
   } catch (e) {
     console.error("search error:", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    let errorMsg = String(e?.message || e);
+    
+    // Provide more helpful error messages based on error type
+    if (errorMsg.includes("ENOTFOUND") || errorMsg.includes("getaddrinfo")) {
+      errorMsg = `שגיאת חיבור לשרת Ktuvit (${ktuvitBaseUrl}). יתכן שהשירות אינו זמין כרגע או שכתובת הדומיין השתנתה.`;
+    } else if (errorMsg.includes("ECONNREFUSED")) {
+      errorMsg = "שרת Ktuvit מסרב להתחבר. יתכן שהשירות מושבת זמנית.";
+    } else if (errorMsg.includes("timeout")) {
+      errorMsg = "תם הזמן הקצוב לחיבור לשרת Ktuvit. נסה שוב.";
+    }
+    
+    res.status(500).json({ ok: false, error: errorMsg });
   }
 });
 
@@ -156,6 +262,55 @@ app.get("/api/download/:ktuvitId/:subId", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+
+// ---- אנדפוינט לבדיקת סטטוס ----
+app.get("/api/status", async (req, res) => {
+  try {
+    const baseUrl = process.env.KTUVIT_BASE_URL || "https://www.ktuvit.me/";
+    const hasToken = !!process.env.KTUVIT_TOKEN;
+    
+    // בדיקה בסיסית של זמינות הדומיין
+    let domainStatus = "unknown";
+    try {
+      const testKtuvit = new KtuvitManager(process.env.KTUVIT_TOKEN || "dummy", true, baseUrl);
+      // נסיון חיפוש בסיסי לבדיקת חיבור
+      await testKtuvit.searchKtuvit("test");
+      domainStatus = "connected";
+    } catch (e) {
+      if (e.message.includes("ENOTFOUND") || e.message.includes("getaddrinfo")) {
+        domainStatus = "dns_error";
+      } else if (e.message.includes("ECONNREFUSED")) {
+        domainStatus = "connection_refused";
+      } else {
+        domainStatus = "other_error";
+      }
+    }
+    
+    res.json({
+      ok: true,
+      status: {
+        baseUrl,
+        hasToken,
+        domainStatus,
+        timestamp: new Date().toISOString(),
+        message: domainStatus === "connected" 
+          ? "הכל פועל כראוי" 
+          : domainStatus === "dns_error"
+          ? "לא ניתן להתחבר לדומיין. נסה להריץ node test-domains.js"
+          : domainStatus === "connection_refused"
+          ? "השרת מסרב להתחבר"
+          : "שגיאה לא ידועה בחיבור"
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ 
+      ok: false, 
+      error: "שגיאה בבדיקת סטטוס",
+      details: e.message 
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Running on http://localhost:${PORT}`);
 });

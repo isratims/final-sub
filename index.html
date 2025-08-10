@@ -21,11 +21,18 @@
     .result b{color:#e5e7eb}
     .download{margin-top:10px}
     .empty{color:#94a3b8;margin-top:10px}
+    code{background:#1e293b;padding:2px 6px;border-radius:4px;font-family:monospace}
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>הורדת כתוביות מ-Ktuvit</h1>
+    
+    <!-- Status indicator -->
+    <div id="connectionStatus" class="result" style="display:none;">
+      <div id="statusText"></div>
+    </div>
+    
     <div class="card">
       <label>סוג</label>
       <select id="mode">
@@ -34,7 +41,7 @@
       </select>
 
       <label>שם / IMDb ID</label>
-      <input id="query" placeholder="לדוגמה: Money Heist / tt6468322" />
+      <input id="query" placeholder="לדוגמה: בית הנייר, Money Heist, tt6468322" />
 
       <div class="row">
         <div>
@@ -50,6 +57,13 @@
       <div class="actions">
         <button class="muted" id="clearBtn">ניקוי</button>
         <button class="primary" id="searchBtn">חיפוש</button>
+      </div>
+
+      <div class="note" style="margin-top: 10px;">
+        💡 <strong>טיפים לחיפוש:</strong><br>
+        • לתוצאות טובות יותר בעברית: השתמש בשם העברי המדויק של הסדרה/סרט<br>
+        • אם לא נמצאו תוצאות בעברית, נסה גם את השם באנגלית<br>
+        • לסדרות: ודא שמספרי העונה והפרק נכונים
       </div>
 
       <div id="status" class="note"></div>
@@ -126,6 +140,38 @@
       }
     }
 
+    async function checkStatus(){
+      try{
+        const r = await fetch('/api/status');
+        const data = await r.json();
+        const statusEl = document.getElementById('connectionStatus');
+        const statusTextEl = document.getElementById('statusText');
+        
+        if(data.ok && data.status){
+          const status = data.status;
+          let statusClass = 'result';
+          let statusMsg = status.message;
+          
+          if(status.domainStatus === 'connected'){
+            statusClass = 'result';
+            statusMsg = `✅ ${statusMsg} (${status.baseUrl})`;
+          } else {
+            statusClass = 'result';
+            statusMsg = `⚠️ ${statusMsg}`;
+            if(status.domainStatus === 'dns_error'){
+              statusMsg += '<br><small>הנחיות לפתרון: בדוק חיבור לאינטרנט או הרץ <code>node test-domains.js</code></small>';
+            }
+          }
+          
+          statusEl.className = statusClass;
+          statusTextEl.innerHTML = statusMsg;
+          statusEl.style.display = 'block';
+        }
+      }catch(e){
+        console.warn('Failed to check status:', e);
+      }
+    }
+
     document.getElementById('searchBtn').onclick = search;
     document.getElementById('clearBtn').onclick = () => {
       queryEl.value = '';
@@ -135,6 +181,9 @@
       clearResults();
       queryEl.focus();
     };
+    
+    // Check status on page load
+    checkStatus();
   </script>
 </body>
 </html>
