@@ -17,9 +17,12 @@ app.use("/api/", rateLimit({ windowMs: 60_000, max: 30, standardHeaders: true })
 
 // ---- Ktuvit ----
 const token = process.env.KTUVIT_TOKEN || ""; // ה-cookie בפורמט u=...&g=...
-if (!token) console.warn("⚠️  חסר KTUVIT_TOKEN בקובץ .env");
+const ktuvitBaseUrl = process.env.KTUVIT_BASE_URL || "https://www.ktuvit.me/";
 
-const ktuvit = new KtuvitManager(token);
+if (!token) console.warn("⚠️  חסר KTUVIT_TOKEN בקובץ .env");
+console.log(`🔗 משתמש בכתובת Ktuvit: ${ktuvitBaseUrl}`);
+
+const ktuvit = new KtuvitManager(token, true, ktuvitBaseUrl);
 
 // ---- עזר ----
 function norm(s) {
@@ -71,7 +74,13 @@ app.post("/api/resolve", async (req, res) => {
     res.json({ ok: true, results });
   } catch (e) {
     console.error("resolve error:", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    let errorMsg = String(e?.message || e);
+    
+    if (errorMsg.includes("ENOTFOUND") || errorMsg.includes("getaddrinfo")) {
+      errorMsg = `שגיאת חיבור לשרת Ktuvit (${ktuvitBaseUrl}). בדוק את החיבור לאינטרנט או נסה שוב מאוחר יותר.`;
+    }
+    
+    res.status(500).json({ ok: false, error: errorMsg });
   }
 });
 
@@ -120,7 +129,18 @@ app.post("/api/search", async (req, res) => {
     });
   } catch (e) {
     console.error("search error:", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    let errorMsg = String(e?.message || e);
+    
+    // Provide more helpful error messages based on error type
+    if (errorMsg.includes("ENOTFOUND") || errorMsg.includes("getaddrinfo")) {
+      errorMsg = `שגיאת חיבור לשרת Ktuvit (${ktuvitBaseUrl}). יתכן שהשירות אינו זמין כרגע או שכתובת הדומיין השתנתה.`;
+    } else if (errorMsg.includes("ECONNREFUSED")) {
+      errorMsg = "שרת Ktuvit מסרב להתחבר. יתכן שהשירות מושבת זמנית.";
+    } else if (errorMsg.includes("timeout")) {
+      errorMsg = "תם הזמן הקצוב לחיבור לשרת Ktuvit. נסה שוב.";
+    }
+    
+    res.status(500).json({ ok: false, error: errorMsg });
   }
 });
 
@@ -156,6 +176,55 @@ app.get("/api/download/:ktuvitId/:subId", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+
+// ---- אנדפוינט לבדיקת סטטוס ----
+app.get("/api/status", async (req, res) => {
+  try {
+    const baseUrl = process.env.KTUVIT_BASE_URL || "https://www.ktuvit.me/";
+    const hasToken = !!process.env.KTUVIT_TOKEN;
+    
+    // בדיקה בסיסית של זמינות הדומיין
+    let domainStatus = "unknown";
+    try {
+      const testKtuvit = new KtuvitManager(process.env.KTUVIT_TOKEN || "dummy", true, baseUrl);
+      // נסיון חיפוש בסיסי לבדיקת חיבור
+      await testKtuvit.searchKtuvit("test");
+      domainStatus = "connected";
+    } catch (e) {
+      if (e.message.includes("ENOTFOUND") || e.message.includes("getaddrinfo")) {
+        domainStatus = "dns_error";
+      } else if (e.message.includes("ECONNREFUSED")) {
+        domainStatus = "connection_refused";
+      } else {
+        domainStatus = "other_error";
+      }
+    }
+    
+    res.json({
+      ok: true,
+      status: {
+        baseUrl,
+        hasToken,
+        domainStatus,
+        timestamp: new Date().toISOString(),
+        message: domainStatus === "connected" 
+          ? "הכל פועל כראוי" 
+          : domainStatus === "dns_error"
+          ? "לא ניתן להתחבר לדומיין. נסה להריץ node test-domains.js"
+          : domainStatus === "connection_refused"
+          ? "השרת מסרב להתחבר"
+          : "שגיאה לא ידועה בחיבור"
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ 
+      ok: false, 
+      error: "שגיאה בבדיקת סטטוס",
+      details: e.message 
+    });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Running on http://localhost:${PORT}`);
 });
